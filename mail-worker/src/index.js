@@ -6,8 +6,11 @@ import emailService from './service/email-service';
 import kvObjService from './service/kv-obj-service';
 import oauthService from './service/oauth-service';
 import analysisService from './service/analysis-service';
+import { routeMaintenance } from './security/maintenance';
 export default {
 	 async fetch(req, env, ctx) {
+		const maintenanceResponse = await routeMaintenance(req, env, ctx);
+		if (maintenanceResponse) return maintenanceResponse;
 
 		const url = new URL(req.url)
 

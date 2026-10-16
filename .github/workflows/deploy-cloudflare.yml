@@ -7,11 +7,19 @@ on:
       - "mail-worker/**"
       - "mail-vue/**"
   workflow_dispatch:
+    inputs:
+      initialize_database:
+        description: 'Run database initialization (disable only for the approved preparation stages)'
+        type: boolean
+        default: true
 
 jobs:
   Deploy-cloud-mail:
     name: 🏗️ Build and Deploy
     runs-on: ubuntu-latest
+    concurrency:
+      group: nesoriel-mail-production
+      cancel-in-progress: false
 
     env:
       NAME: ${{ secrets.NAME || vars.NAME || 'cloud-mail' }}
@@ -28,6 +36,11 @@ jobs:
       AI_MODEL: ${{ secrets.AI_MODEL || vars.AI_MODEL || '@cf/meta/llama-3.1-8b-instruct-fast' }}
       CLOUDFLARE_EMAIL: ${{ secrets.CF_EMAIL || vars.CF_EMAIL || false }}
       ANALYSIS_CACHE: ${{ secrets.ANALYSIS_CACHE || vars.ANALYSIS_CACHE || false }}
+      MAINTENANCE_ENABLED: ${{ vars.MAINTENANCE_ENABLED || 'false' }}
+      MAINTENANCE_HOST: ${{ vars.MAINTENANCE_HOST }}
+      CF_ACCESS_TEAM_DOMAIN: ${{ vars.CF_ACCESS_TEAM_DOMAIN }}
+      CF_ACCESS_AUD: ${{ vars.CF_ACCESS_AUD }}
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
 
 
     outputs:
@@ -37,6 +50,33 @@ jobs:
     steps:
       - name: 🚚 检出代码仓库 / Checkout repository
         uses: actions/checkout@v4
+
+      - name: Validate maintenance settings before deployment
+        env:
+          INITIALIZE_DATABASE: ${{ github.event_name == 'push' || inputs.initialize_database }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          enabled = os.environ['MAINTENANCE_ENABLED']
+          if enabled not in ('true', 'false'):
+              sys.exit('MAINTENANCE_ENABLED must be true or false')
+          if enabled == 'true':
+              patterns = {
+                  'MAINTENANCE_HOST': r'[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev',
+                  'CF_ACCESS_TEAM_DOMAIN': r'https://[a-z0-9-]+\.cloudflareaccess\.com',
+                  'CF_ACCESS_AUD': r'[A-Za-z0-9_-]+',
+                  'CF_ACCESS_CLIENT_ID': r'[A-Za-z0-9_.-]+',
+              }
+              for name, pattern in patterns.items():
+                  if not re.fullmatch(pattern, os.environ.get(name, '')):
+                      sys.exit(f'{name} is missing or invalid')
+          if os.environ['INITIALIZE_DATABASE'] == 'true':
+              if enabled != 'true':
+                  sys.exit('Initialization requires the approved Access-protected maintenance entry')
+              if not os.environ.get('CF_ACCESS_CLIENT_SECRET'):
+                  sys.exit('CF_ACCESS_CLIENT_SECRET is required')
+          PY
 
       - name: ⚙ 设置 pnpm / Set up pnpm
         uses: pnpm/action-setup@v4.1.0
@@ -53,6 +93,13 @@ jobs:
       - name: 📦 安装依赖 / Install dependencies
         run: pnpm install --frozen-lockfile
         working-directory: ./mail-worker
+
+      - name: Test maintenance authentication and routing
+        run: pnpm run test:maintenance
+        working-directory: ./mail-worker
+
+      - name: Test initialization client without network access
+        run: bash scripts/tests/initialize-database.test.sh
 
       - name: 📡 禁用 Wrangler 遥测 / Disable wrangler telemetry
         working-directory: ./mail-worker
@@ -127,6 +174,17 @@ jobs:
           sed -i "s|\${LINUXDO_CLIENT_ID}|${LINUXDO_CLIENT_ID}|g" "$CONFIG_FILE"
           sed -i "s|\${LINUXDO_CLIENT_SECRET}|${LINUXDO_CLIENT_SECRET}|g" "$CONFIG_FILE"
           sed -i "s|\${LINUXDO_CALLBACK_URL}|${LINUXDO_CALLBACK_URL}|g" "$CONFIG_FILE"
+
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path('wrangler-action.toml')
+          config = path.read_text()
+          config = config.replace('${MAINTENANCE_ENABLED}', os.environ['MAINTENANCE_ENABLED'])
+          for name in ('MAINTENANCE_HOST', 'CF_ACCESS_TEAM_DOMAIN', 'CF_ACCESS_AUD', 'CF_ACCESS_CLIENT_ID'):
+              config = config.replace('${' + name + '_JSON}', json.dumps(os.environ.get(name, '')))
+          path.write_text(config)
+          PY
           
           echo "✅ Environment setup completed."
 
@@ -211,13 +269,14 @@ jobs:
         working-directory: ./mail-worker
         run: |
           echo "🚀 Starting deployment..."
+          set +e
           pnpm wrangler deploy -c wrangler-action.toml 2>&1 \
             | tee deploy.log \
             | grep -v "https://.*\.workers\.dev" \
-            | sed -E 's/env\.domain .*/env.domain (***)/' \
-            || true
+            | sed -E 's/env\.domain .*/env.domain (***)/'
           
           DEPLOY_EXIT_CODE=${PIPESTATUS[0]}
+          set -e
           if [ $DEPLOY_EXIT_CODE -ne 0 ]; then
             exit 1
           fi
@@ -232,29 +291,13 @@ jobs:
           echo "✅ Setup completed."
 
       - name: ♻️ 初始化数据库 / Initialize database
-        run: |
-          echo "🛠️ Starting database initialization..."
-          sleep 15
-          
-          WORKER_URL="${CUSTOM_DOMAIN:+https://$CUSTOM_DOMAIN}"
-          WORKER_URL="${WORKER_URL:-${{ steps.deploy.outputs.worker_url }}}"
-          
-          if [ -z "$WORKER_URL" ]; then
-            echo "❌ Preview URL not available. Please set CUSTOM_DOMAIN."
-            exit 1
-          fi
-          
-          HTTP_CODE=$(curl -sL -w "%{http_code}" -o response.txt "$WORKER_URL/api/init/${JWT_SECRET}")
-          RESPONSE_BODY=$(cat response.txt)
-
-          if [ "$RESPONSE_BODY" = "success" ]; then
-            echo "✅ Setup completed."
-          else
-            echo "❌ Failed. HTTP: $HTTP_CODE, Response: $RESPONSE_BODY"
-            exit 1
-          fi
+        if: github.event_name == 'push' || inputs.initialize_database
+        env:
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: bash scripts/initialize-database.sh
 
       - name: 🗑️ 删除运行记录 / Delete workflow runs
+        if: github.event_name == 'push' || inputs.initialize_database
         uses: GitRML/delete-workflow-runs@main
         continue-on-error: true
         with:
