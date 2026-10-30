@@ -1,0 +1,36 @@
+name: Initialize mail database through maintenance Access
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_initialization:
+        description: 'Run the existing D1 migrations and refresh KV after backup and validation'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  initialize:
+    if: inputs.confirm_initialization
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: nesoriel-mail-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize once without redeploying
+        env:
+          MAINTENANCE_ENABLED: ${{ vars.MAINTENANCE_ENABLED || 'false' }}
+          MAINTENANCE_HOST: ${{ vars.MAINTENANCE_HOST }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET || vars.JWT_SECRET }}
+        run: |
+          if [ "$MAINTENANCE_ENABLED" != 'true' ]; then
+            echo 'The approved maintenance entry is not enabled'
+            exit 1
+          fi
+          bash scripts/initialize-database.sh

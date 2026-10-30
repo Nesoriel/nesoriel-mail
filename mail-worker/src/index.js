@@ -6,8 +6,11 @@ import emailService from './service/email-service';
 import r2Service from './service/r2-service';
 import oauthService from './service/oauth-service';
 import analysisService from './service/analysis-service';
+import { routeMaintenance } from './security/maintenance';
 export default {
 	 async fetch(req, env, ctx) {
+		const maintenanceResponse = await routeMaintenance(req, env, ctx);
+		if (maintenanceResponse) return maintenanceResponse;
 
 		const url = new URL(req.url)
 

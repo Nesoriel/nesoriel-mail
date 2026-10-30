@@ -1,6 +1,8 @@
 name = "${NAME}"
 main = "src/index.js"
 compatibility_date = "2025-06-04"
+workers_dev = ${MAINTENANCE_ENABLED}
+preview_urls = false
 
 [observability]
 enabled = true
@@ -39,6 +41,11 @@ crons = ["0 * * * *"]	#每小时执行；resetDaySendCount 仅在 UTC 0 点生�
 
 
 [vars]
+maintenance_enabled = "${MAINTENANCE_ENABLED}"
+maintenance_host = ${MAINTENANCE_HOST_JSON}
+access_team_domain = ${CF_ACCESS_TEAM_DOMAIN_JSON}
+access_aud = ${CF_ACCESS_AUD_JSON}
+access_client_id = ${CF_ACCESS_CLIENT_ID_JSON}
 ai_model = "${AI_MODEL}"
 analysis_cache = "${ANALYSIS_CACHE}"
 #orm_log = false
